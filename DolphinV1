@@ -1,0 +1,916 @@
+if not game:IsLoaded() then game.Loaded:Wait() end
+if game.GameId ~= 6035872082 then warn("[Dolphin] Wrong game.") return end
+
+print("Anti Cheat Has Been Disabled :D")
+
+local success, err = pcall(function()
+    assert(getgc) assert(debug and debug.info) assert(hookfunction)
+    assert(getconnections) assert(newcclosure)
+
+    local RS = game:GetService("ReplicatedStorage")
+    local LogService = game:GetService("LogService")
+    local ScriptContext = game:GetService("ScriptContext")
+    local Players = game:GetService("Players")
+    local LP = Players.LocalPlayer
+
+    task.spawn(function()
+        local hooked = 0
+        for _, v in pairs(getgc(true)) do
+            if typeof(v) == "function" then
+                local ok, src = pcall(function() return debug.info(v, "s") end)
+                if ok and type(src) == "string" and src:find("AnalyticsPipelineController") then
+                    hooked += 1
+                    hookfunction(v, newcclosure(function(...) return wait(9e9) end))
+                end
+            end
+        end
+        print("Hanged " .. hooked .. " functions")
+    end)
+
+    task.spawn(function()
+        local ok, remote = pcall(function()
+            return RS:WaitForChild("Remotes",5):WaitForChild("AnalyticsPipeline",5):WaitForChild("RemoteEvent",5)
+        end)
+        if ok and remote then
+            for _, conn in pairs(getconnections(remote.OnClientEvent)) do
+                if conn and conn.Function then
+                    pcall(function() hookfunction(conn.Function, newcclosure(function(...) end)) end)
+                end
+            end
+        end
+    end)
+
+    task.spawn(function()
+        for _, conn in pairs(getconnections(LogService.MessageOut)) do
+            if conn and conn.Function then
+                pcall(function() hookfunction(conn.Function, newcclosure(function(...) end)) end)
+            end
+        end
+    end)
+
+    task.spawn(function()
+        for _, conn in ipairs(getconnections(ScriptContext.Error)) do
+            pcall(function() conn:Disable() end)
+        end
+        pcall(function() hookfunction(ScriptContext.Error.Connect, newcclosure(function(...) return nil end)) end)
+    end)
+
+    task.spawn(function()
+        for _, name in ipairs({"Kick","kick"}) do
+            local fn = LP[name]
+            if type(fn) == "function" then
+                hookfunction(fn, newcclosure(function(self, ...)
+                    if self == LP then return end
+                    return fn(self, ...)
+                end))
+            end
+        end
+    end)
+end)
+
+-- ==================== LIBRARY ====================
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/Library.lua"))()
+
+local Window = Library:CreateWindow({
+    Title = "🐬 Dolphin",
+    Footer = "V1 | Private Tool | @dolphinbackup",
+    ToggleKeybind = Enum.KeyCode.RightShift,
+    Center = true,
+    AutoShow = true
+})
+
+-- Shimmer footer
+task.spawn(function()
+    task.wait(0.5)
+    pcall(function()
+        local footer = nil
+        for _, g in ipairs(game:GetService("Players").LocalPlayer.PlayerGui:GetChildren()) do
+            for _, v in ipairs(g:GetDescendants()) do
+                if v:IsA("TextLabel") and v.Text:find("dolphinbackup") then
+                    footer = v break
+                end
+            end
+            if footer then break end
+        end
+        if not footer then return end
+        footer.RichText = true
+        local t = 0
+        local text = "V1 | Private Tool | @dolphinbackup"
+        game:GetService("RunService").Heartbeat:Connect(function(dt)
+            t = t + dt * 1.5
+            local result = ""
+            for i = 1, #text do
+                local charWave = (math.sin(t * 2 - i * 0.3) + 1) / 2
+                local cr = math.floor(200 * charWave + 30)
+                result = result .. string.format('<font color="rgb(%d,0,0)">%s</font>', cr, text:sub(i,i))
+            end
+            footer.Text = result
+        end)
+    end)
+end)
+
+-- ==================== SERVICES ====================
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local player = Players.LocalPlayer
+local controllers = player.PlayerScripts.Controllers
+local myUserId = tostring(player.UserId)
+
+-- ==================== SHARED STATE ====================
+local equipped = {}
+local unlockedSkins = {}
+local constructingWeapon = nil
+local modulesReady = false
+local patchesApplied = false
+local weaponUnlockPatched = false
+local SkinDropdown = nil
+local dropdownOptions = {"None"}
+local targetSkinName = ""
+local weaponUnlockEnabled = false
+local weaponUnlockSuspended = false
+
+local EnumLibrary, CosmeticLibrary, ItemLibrary, DataController, ClientItem
+
+-- Suspend weapon unlock during combat via TeamID
+player.AttributeChanged:Connect(function(attr)
+    if attr == "TeamID" then
+        local v = player:GetAttribute("TeamID")
+        local s = tostring(v or "")
+        weaponUnlockSuspended = s ~= "" and s ~= "0" and s ~= "\0"
+    end
+end)
+
+local allWeapons = {
+    "Crossbow","Grenade Launcher","Medkit","Jump Pad","Spear","Flashbang",
+    "Subspace Tripmine","Flamethrower","Grenade","Fists","Warpstone","Grappler",
+    "Scythe","Slingshot","Battle Axe","Flare Gun","Molotov","Revolver","Shotgun",
+    "RPG","Trowel","Riot Shield","Assault Rifle","Sniper","Paintball Gun","Distortion",
+    "Shorty","Freeze Ray","Exogun","Maul","Chainsaw","Warper","Spray","Energy Pistols",
+    "War Horn","Satchel","Handgun","Permafrost","Daggers","Katana","Energy Rifle",
+    "Uzi","Smoke Grenade","Bow","Knife","Gunblade","Burst Rifle","Minigun"
+}
+
+-- ==================== CONFIG ====================
+local CONFIG_FILE = "dolphin_config.json"
+local defaultConfig = {
+    leaderboardEnabled = false,
+    leaderboardELO = 0,
+    leaderboardStreak = 0,
+    leaderboardWins = 0,
+    leaderboardElims = 0,
+    leaderboardLevel = 0,
+    charmRankEnabled = false,
+    charmRankValue = 1,
+    weaponUnlockEnabled = false,
+    unlockedSkins = {},
+    equippedSkins = {},
+}
+local Config = {}
+
+local function loadConfig()
+    local ok, data = pcall(function()
+        if isfile(CONFIG_FILE) then return HttpService:JSONDecode(readfile(CONFIG_FILE)) end
+    end)
+    if ok and type(data) == "table" then
+        -- Strip invalid keys from old script versions
+        local validKeys = {}
+        for k in pairs(defaultConfig) do validKeys[k] = true end
+        for k in pairs(data) do
+            if not validKeys[k] then data[k] = nil end
+        end
+        for k, v in pairs(defaultConfig) do if data[k] == nil then data[k] = v end end
+        Config = data
+    else
+        Config = {}
+        for k, v in pairs(defaultConfig) do Config[k] = v end
+    end
+end
+
+local saveQueued = false
+local function saveConfig()
+    if saveQueued then return end
+    saveQueued = true
+    task.delay(1, function()
+        saveQueued = false
+        pcall(function() writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end)
+    end)
+end
+
+loadConfig()
+
+-- Restore weapon unlock state from config
+weaponUnlockEnabled = Config.weaponUnlockEnabled or false
+
+-- ==================== LEADERBOARD STATE ====================
+local leaderboardSpoofEnabled = Config.leaderboardEnabled or false
+local leaderboardSpoofValues = {
+    ["Highest ELO"]                = Config.leaderboardELO or 0,
+    ["Current Highest Win Streak"] = Config.leaderboardStreak or 0,
+    ["Most Wins"]                  = Config.leaderboardWins or 0,
+    ["Most Eliminations"]          = Config.leaderboardElims or 0,
+    ["Highest Level"]              = Config.leaderboardLevel or 0,
+}
+local charmRankEnabled = Config.charmRankEnabled or false
+local charmRankValue = Config.charmRankValue or 1
+
+local function formatNumber(n)
+    local s = tostring(math.floor(n))
+    return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,","")
+end
+
+local _cachedRankedLib = nil
+local lbDebounce = false
+local function debouncedRefresh()
+    if lbDebounce then return end
+    lbDebounce = true
+    task.delay(1.5, function()
+        lbDebounce = false
+        if leaderboardSpoofEnabled then
+            pcall(function() ReplicatedStorage.Remotes.Misc.RequestLeaderboards:FireServer() end)
+        end
+    end)
+end
+
+local function applyNametag()
+    if not leaderboardSpoofEnabled then return end
+    pcall(function()
+        if leaderboardSpoofValues["Highest ELO"] ~= 0 then
+            player:SetAttribute("DisplayELO", leaderboardSpoofValues["Highest ELO"])
+        end
+        if leaderboardSpoofValues["Current Highest Win Streak"] ~= 0 then
+            player:SetAttribute("StatisticDuelsWinStreak", leaderboardSpoofValues["Current Highest Win Streak"])
+        end
+        if leaderboardSpoofValues["Highest Level"] ~= 0 then
+            player:SetAttribute("Level", leaderboardSpoofValues["Highest Level"])
+            local cl = player:FindFirstChild("CustomLeaderstats")
+            if cl then
+                if cl:FindFirstChild("Level") then cl.Level.Value = leaderboardSpoofValues["Highest Level"] end
+                if cl:FindFirstChild("Win Streak") then cl["Win Streak"].Value = leaderboardSpoofValues["Current Highest Win Streak"] end
+            end
+        end
+    end)
+    debouncedRefresh()
+end
+
+player.CharacterAdded:Connect(function() task.wait(1) applyNametag() end)
+
+-- ==================== CHARM RANK ====================
+local charmRankHooked = false
+local function applyCharmRankHook()
+    if charmRankHooked then return end
+    for _, v in ipairs(getgc(false)) do
+        if typeof(v) == "function" then
+            local ok, name = pcall(debug.info, v, "n")
+            local ok2, src = pcall(debug.info, v, "s")
+            if ok and ok2 and name == "_SetupSeasonRankCharm" and type(src) == "string" and src:find("Charm") then
+                local orig
+                orig = hookfunction(v, newcclosure(function(self, ...)
+                    orig(self, ...)
+                    if not charmRankEnabled then return end
+                    pcall(function()
+                        local model = rawget(self, "Model")
+                        if not model or typeof(model) ~= "Instance" then return end
+                        for _, desc in ipairs(model:GetDescendants()) do
+                            if desc:IsA("SurfaceGui") then
+                                for _, child in ipairs(desc:GetDescendants()) do
+                                    if child:IsA("TextLabel") then
+                                        child.Text = "#"..tostring(charmRankValue)
+                                    end
+                                end
+                            elseif (desc:IsA("TextLabel") or desc:IsA("TextButton")) and desc.Text:match("^#?%d+$") then
+                                desc.Text = "#"..tostring(charmRankValue)
+                            end
+                        end
+                    end)
+                end))
+                charmRankHooked = true
+                print("✅ Charm rank hook applied.")
+                break
+            end
+        end
+    end
+end
+
+-- ==================== HELPERS ====================
+local cosmeticNameCache = nil
+local function resolveCosmeticName(input)
+    if not CosmeticLibrary then return nil end
+    if CosmeticLibrary.Cosmetics[input] then return input end
+    if not cosmeticNameCache then
+        cosmeticNameCache = {}
+        for name in pairs(CosmeticLibrary.Cosmetics) do
+            cosmeticNameCache[name:lower()] = name
+        end
+    end
+    return cosmeticNameCache[input:lower()]
+end
+
+local function cloneCosmetic(name, cosmeticType, options)
+    if not CosmeticLibrary then return nil end
+    local base = CosmeticLibrary.Cosmetics[name]
+    if not base then return nil end
+    local data = {}
+    for key, value in pairs(base) do data[key] = value end
+    data.Name = name
+    data.Type = data.Type or cosmeticType
+    data.Seed = data.Seed or math.random(1, 1000000)
+    if EnumLibrary then
+        local ok, enumId = pcall(EnumLibrary.ToEnum, EnumLibrary, name)
+        if ok and enumId then data.Enum = enumId data.ObjectID = data.ObjectID or enumId end
+    end
+    if options and options.inverted ~= nil then data.Inverted = options.inverted end
+    return data
+end
+
+local lastReplicate = 0
+local function replicateWeapon()
+    local now = tick()
+    if now - lastReplicate < 2 then return end
+    lastReplicate = now
+    task.spawn(function()
+        task.wait()
+        pcall(function() DataController.CurrentData:Replicate("WeaponInventory") end)
+    end)
+end
+
+-- ==================== PATCHES ====================
+local function applyPatches()
+    if patchesApplied then return end
+    if not CosmeticLibrary or not DataController or not ItemLibrary then return end
+    patchesApplied = true
+
+    local origOwns = CosmeticLibrary.OwnsCosmetic
+    local origOwnsNormally = CosmeticLibrary.OwnsCosmeticNormally
+    local origOwnsUniversally = CosmeticLibrary.OwnsCosmeticUniversally
+    local origOwnsForWeapon = CosmeticLibrary.OwnsCosmeticForWeapon
+
+    CosmeticLibrary.OwnsCosmetic = function(self, inventory, name, weapon)
+        if unlockedSkins[name] then return true end
+        return origOwns(self, inventory, name, weapon)
+    end
+    CosmeticLibrary.OwnsCosmeticNormally = function(self, inventory, name)
+        if unlockedSkins[name] then return true end
+        return origOwnsNormally(self, inventory, name)
+    end
+    CosmeticLibrary.OwnsCosmeticUniversally = function(self, inventory, name)
+        if unlockedSkins[name] then return true end
+        return origOwnsUniversally(self, inventory, name)
+    end
+    CosmeticLibrary.OwnsCosmeticForWeapon = function(self, inventory, name, weapon)
+        if unlockedSkins[name] then return true end
+        return origOwnsForWeapon(self, inventory, name, weapon)
+    end
+
+    -- Single Get hook — CosmeticInventory + WeaponInventory (suspended during combat)
+    local origGet = DataController.Get
+    DataController.Get = function(self, key)
+        local data = origGet(self, key)
+        if key == "CosmeticInventory" then
+            local proxy = {}
+            if data then for k, v in pairs(data) do proxy[k] = v end end
+            for skinName in pairs(unlockedSkins) do proxy[skinName] = true end
+            return proxy
+        end
+        if weaponUnlockEnabled and not weaponUnlockSuspended and tostring(key):lower() == "weaponinventory" then
+            local proxy = {}
+            if type(data) == "table" then for k, v in pairs(data) do proxy[k] = v end end
+            for _, name in ipairs(allWeapons) do
+                if proxy[name] == nil then
+                    proxy[name] = {Name=name, Owned=true, Unlocked=true, IsFavorited=false, XP=0, Level=1}
+                end
+            end
+            return proxy
+        end
+        return data
+    end
+
+    -- Single GetWeaponData hook — skin merge only, never injects fake data
+    local origGWD = DataController.GetWeaponData
+    DataController.GetWeaponData = function(self, weaponName)
+        local data = origGWD(self, weaponName)
+        if data == nil then return nil end
+        if not equipped[weaponName] then return data end
+        local merged = {}
+        for key, value in pairs(data) do merged[key] = value end
+        pcall(setmetatable, merged, getmetatable(data))
+        merged.Name = weaponName
+        for cosmeticType, cosmeticData in pairs(equipped[weaponName]) do
+            merged[cosmeticType] = cosmeticData
+        end
+        return merged
+    end
+
+    -- GetUnlockedWeapons — suspended during combat
+    local origGUW = DataController.GetUnlockedWeapons
+    if origGUW then
+        DataController.GetUnlockedWeapons = function(self, ...)
+            if not weaponUnlockEnabled or weaponUnlockSuspended then
+                return origGUW(self, ...)
+            end
+            local result = {}
+            for _, name in ipairs(allWeapons) do result[name] = true end
+            return result
+        end
+    end
+
+    if ClientItem and ClientItem._CreateViewModel then
+        local origCVM = ClientItem._CreateViewModel
+        ClientItem._CreateViewModel = function(self, viewmodelRef)
+            local weaponName = self.Name
+            local weaponPlayer = self.ClientFighter and self.ClientFighter.Player
+            constructingWeapon = (weaponPlayer == player) and weaponName or nil
+            if weaponPlayer == player and equipped[weaponName] and equipped[weaponName].Skin and viewmodelRef then
+                pcall(function()
+                    local dataKey = self:ToEnum("Data")
+                    local skinKey = self:ToEnum("Skin")
+                    local nameKey = self:ToEnum("Name")
+                    if viewmodelRef[dataKey] then
+                        viewmodelRef[dataKey][skinKey] = equipped[weaponName].Skin
+                        viewmodelRef[dataKey][nameKey] = equipped[weaponName].Skin.Name
+                    elseif viewmodelRef.Data then
+                        viewmodelRef.Data.Skin = equipped[weaponName].Skin
+                        viewmodelRef.Data.Name = equipped[weaponName].Skin.Name
+                    end
+                end)
+            end
+            local result = origCVM(self, viewmodelRef)
+            constructingWeapon = nil
+            return result
+        end
+    end
+
+    local vmModule = player.PlayerScripts.Modules.ClientReplicatedClasses.ClientFighter.ClientItem:FindFirstChild("ClientViewModel")
+    if vmModule then
+        local VM = require(vmModule)
+        if VM.GetWrap then
+            local origGW = VM.GetWrap
+            VM.GetWrap = function(self)
+                local weaponName = self.ClientItem and self.ClientItem.Name
+                local weaponPlayer = self.ClientItem and self.ClientItem.ClientFighter and self.ClientItem.ClientFighter.Player
+                if weaponName and weaponPlayer == player and equipped[weaponName] and equipped[weaponName].Wrap then
+                    return equipped[weaponName].Wrap
+                end
+                return origGW(self)
+            end
+        end
+        local origNew = VM.new
+        VM.new = function(replicatedData, clientItem)
+            local weaponPlayer = clientItem.ClientFighter and clientItem.ClientFighter.Player
+            local weaponName = constructingWeapon or clientItem.Name
+            if weaponPlayer == player and equipped[weaponName] then
+                pcall(function()
+                    local RC = require(ReplicatedStorage.Modules.ReplicatedClass)
+                    local dataKey = RC:ToEnum("Data")
+                    replicatedData[dataKey] = replicatedData[dataKey] or {}
+                    local c = equipped[weaponName]
+                    if c.Skin then replicatedData[dataKey][RC:ToEnum("Skin")] = c.Skin end
+                    if c.Wrap then replicatedData[dataKey][RC:ToEnum("Wrap")] = c.Wrap end
+                    if c.Charm then replicatedData[dataKey][RC:ToEnum("Charm")] = c.Charm end
+                end)
+            end
+            local result = origNew(replicatedData, clientItem)
+            if weaponPlayer == player and equipped[weaponName] and equipped[weaponName].Wrap and result and result._UpdateWrap then
+                pcall(function() result:_UpdateWrap() end)
+                task.delay(0.1, function()
+                    pcall(function() if not result._destroyed then result:_UpdateWrap() end end)
+                end)
+            end
+            return result
+        end
+    end
+
+    local origGVMI = ItemLibrary.GetViewModelImageFromWeaponData
+    ItemLibrary.GetViewModelImageFromWeaponData = function(self, weaponData, highRes)
+        if not weaponData then return origGVMI(self, weaponData, highRes) end
+        local weaponName = weaponData.Name
+        if equipped[weaponName] and equipped[weaponName].Skin then
+            local skinInfo = self.ViewModels[equipped[weaponName].Skin.Name]
+            if skinInfo then
+                return skinInfo[highRes and "ImageHighResolution" or "Image"] or skinInfo.Image
+            end
+        end
+        return origGVMI(self, weaponData, highRes)
+    end
+
+    if hookmetamethod then
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local dataRemotes = remotes and remotes:FindFirstChild("Data")
+        local equipRemote = dataRemotes and dataRemotes:FindFirstChild("EquipCosmetic")
+        if equipRemote then
+            local oldNC
+            oldNC = hookmetamethod(game, "__namecall", function(self, ...)
+                if self ~= equipRemote then return oldNC(self, ...) end
+                if getnamecallmethod() ~= "FireServer" then return oldNC(self, ...) end
+                local args = {...}
+                local weaponName, cosmeticType, cosmeticName, options = args[1], args[2], args[3], args[4] or {}
+                equipped[weaponName] = equipped[weaponName] or {}
+                if not cosmeticName or cosmeticName == "None" or cosmeticName == "" then
+                    equipped[weaponName][cosmeticType] = nil
+                    if not next(equipped[weaponName]) then equipped[weaponName] = nil end
+                elseif unlockedSkins[cosmeticName] then
+                    local cloned = cloneCosmetic(cosmeticName, cosmeticType, {inverted = options.IsInverted})
+                    if cloned then equipped[weaponName][cosmeticType] = cloned end
+                else
+                    return oldNC(self, ...)
+                end
+                Config.equippedSkins = Config.equippedSkins or {}
+                if equipped[weaponName] then
+                    Config.equippedSkins[weaponName] = Config.equippedSkins[weaponName] or {}
+                    if cosmeticName and cosmeticName ~= "None" and cosmeticName ~= "" then
+                        Config.equippedSkins[weaponName][cosmeticType] = cosmeticName
+                    else
+                        Config.equippedSkins[weaponName][cosmeticType] = nil
+                    end
+                else
+                    Config.equippedSkins[weaponName] = nil
+                end
+                saveConfig()
+                task.spawn(function()
+                    task.wait()
+                    pcall(function() DataController.CurrentData:Replicate("WeaponInventory") end)
+                end)
+                return
+            end)
+        end
+    end
+
+    print("✅ Patches applied.")
+end
+
+-- ==================== LEADERBOARD HOOKS ====================
+task.spawn(function()
+    local ok, err = pcall(function()
+        local ps = player.PlayerScripts
+
+        local LD = require(ps.Modules.LobbyElements:WaitForChild("LeaderboardDisplays", 10))
+        local mt = getmetatable(LD.Displays[1])
+        local indexTable = mt.__index
+        local origGen = indexTable._Generate
+        indexTable._Generate = function(self, ...)
+            if leaderboardSpoofEnabled then
+                local serial = self._leaderboard_serial
+                if serial and serial.Players and serial.Name then
+                    local spoofValue = leaderboardSpoofValues[serial.Name]
+                    if spoofValue and spoofValue ~= 0 then
+                        for i = #serial.Players, 1, -1 do
+                            if tostring(serial.Players[i].key) == myUserId then table.remove(serial.Players, i) end
+                        end
+                        local insertPos = #serial.Players + 1
+                        for i, entry in ipairs(serial.Players) do
+                            if (serial.IsAscending and spoofValue < (entry.value or 0))
+                            or (not serial.IsAscending and spoofValue > (entry.value or 0)) then
+                                insertPos = i break
+                            end
+                        end
+                        table.insert(serial.Players, insertPos, {key=tonumber(myUserId), value=spoofValue})
+                    end
+                end
+            end
+            return origGen(self, ...)
+        end
+
+        local remote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Misc"):WaitForChild("UpdateLeaderboard")
+        remote.OnClientEvent:Connect(function(data)
+            if not leaderboardSpoofEnabled then return end
+            if not data or not data.Players or not data.Name then return end
+            local spoofValue = leaderboardSpoofValues[data.Name]
+            if not spoofValue or spoofValue == 0 then return end
+            for i = #data.Players, 1, -1 do
+                if tostring(data.Players[i].key) == myUserId then table.remove(data.Players, i) end
+            end
+            local insertPos = #data.Players + 1
+            for i, entry in ipairs(data.Players) do
+                if (data.IsAscending and spoofValue < entry.value)
+                or (not data.IsAscending and spoofValue > entry.value) then
+                    insertPos = i break
+                end
+            end
+            table.insert(data.Players, insertPos, {key=tonumber(myUserId), value=spoofValue})
+        end)
+
+        local PLS = require(ps.Modules.UserInterface.PlayerList.Elements.PlayerListSlot)
+        local plsMt = PLS.__index or PLS
+        local origSLS = plsMt.SetLeaderstat
+        plsMt.SetLeaderstat = function(self, name, value, ...)
+            if leaderboardSpoofEnabled then
+                local cf = self.ClientFighter
+                if cf and cf.Player == player then
+                    if name == "Level" and leaderboardSpoofValues["Highest Level"] ~= 0 then
+                        value = formatNumber(leaderboardSpoofValues["Highest Level"])
+                    elseif name == "Current ELO" and leaderboardSpoofValues["Highest ELO"] ~= 0 then
+                        value = formatNumber(leaderboardSpoofValues["Highest ELO"])
+                    elseif name == "Win Streak" and leaderboardSpoofValues["Current Highest Win Streak"] ~= 0 then
+                        value = formatNumber(leaderboardSpoofValues["Current Highest Win Streak"])
+                    end
+                end
+            end
+            return origSLS(self, name, value, ...)
+        end
+
+        task.delay(3, function()
+            local hookedCount = 0
+            for _, v in ipairs(getgc(false)) do
+                if typeof(v) == "function" then
+                    local ok2, fname = pcall(debug.info, v, "n")
+                    if ok2 and fname == "_SetupSeasonRankCharm" then
+                        local ok3, upvals = pcall(debug.getupvalues, v)
+                        if ok3 and upvals and upvals[1] then
+                            local RankedLib = upvals[1]
+                            if type(RankedLib) == "table"
+                            and type(RankedLib.GetRank) == "function"
+                            and type(RankedLib.RankProfiles) == "table"
+                            and RankedLib.RankProfiles.ranks_version1 then
+                                local origGR = RankedLib.GetRank
+                                RankedLib.GetRank = function(data, ...)
+                                    if leaderboardSpoofEnabled and leaderboardSpoofValues["Highest ELO"] ~= 0 then
+                                        local elo = leaderboardSpoofValues["Highest ELO"]
+                                        local rp = RankedLib.RankProfiles.ranks_version1
+                                        local bestRank = "Unranked"
+                                        for _, rankName in ipairs(rp.RanksOrder) do
+                                            local rankData = rp.Ranks[rankName]
+                                            if rankData and rankData.RequiredELO and elo >= rankData.RequiredELO then
+                                                bestRank = rankName
+                                            end
+                                        end
+                                        return bestRank
+                                    end
+                                    return origGR(data, ...)
+                                end
+                                hookedCount += 1
+                                _cachedRankedLib = RankedLib
+                            end
+                        end
+                    end
+                end
+            end
+            print("✅ GetRank hooked on " .. hookedCount .. " instances.")
+            applyCharmRankHook()
+        end)
+
+        print("✅ Leaderboard + PlayerList hooks applied.")
+    end)
+    if not ok then warn("[LeaderboardHook] " .. tostring(err)) end
+end)
+
+-- ==================== MODULE INIT ====================
+task.defer(function()
+    local ok, err = pcall(function()
+        EnumLibrary = require(ReplicatedStorage.Modules:WaitForChild("EnumLibrary", 10))
+        if EnumLibrary then EnumLibrary:WaitForEnumBuilder() end
+        CosmeticLibrary = require(ReplicatedStorage.Modules:WaitForChild("CosmeticLibrary", 10))
+        ItemLibrary = require(ReplicatedStorage.Modules:WaitForChild("ItemLibrary", 10))
+        DataController = require(controllers:WaitForChild("PlayerDataController", 10))
+        pcall(function()
+            ClientItem = require(player.PlayerScripts.Modules.ClientReplicatedClasses.ClientFighter.ClientItem)
+        end)
+        cosmeticNameCache = nil
+
+        if Config.unlockedSkins and #Config.unlockedSkins > 0 then
+            for _, skinName in ipairs(Config.unlockedSkins) do
+                if CosmeticLibrary.Cosmetics[skinName] then
+                    unlockedSkins[skinName] = true
+                    if not table.find(dropdownOptions, skinName) then
+                        table.insert(dropdownOptions, skinName)
+                    end
+                end
+            end
+            if next(unlockedSkins) then
+                task.spawn(function()
+                    while not modulesReady do task.wait(0.5) end
+                    applyPatches()
+                    if Config.equippedSkins then
+                        for weaponName, cosmeticTypes in pairs(Config.equippedSkins) do
+                            if type(cosmeticTypes) == "table" then
+                                for cType, cName in pairs(cosmeticTypes) do
+                                    if type(cName) == "string" and cName ~= "" then
+                                        local skinData = cloneCosmetic(cName, cType, {})
+                                        if skinData then
+                                            equipped[weaponName] = equipped[weaponName] or {}
+                                            equipped[weaponName][cType] = skinData
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        replicateWeapon()
+                    end
+                    print("✅ Config restored: " .. tostring(#Config.unlockedSkins) .. " skins.")
+                end)
+            end
+        end
+
+        -- Apply weapon unlock patches if it was saved as enabled
+        if weaponUnlockEnabled then
+            while not modulesReady do task.wait(0.5) end
+            applyPatches()
+        end
+
+        modulesReady = true
+        print("✅ Modules loaded.")
+    end)
+    if not ok then warn("[SkinChanger] Module load failed: " .. tostring(err)) end
+end)
+
+-- ==================== UI ====================
+
+-- ==================== SKINS TAB ====================
+local UnlockTab = Window:AddTab("Skins", "shirt")
+
+local SkinGroupbox = UnlockTab:AddLeftGroupbox("🔓 Cosmetic Unlocker")
+SkinGroupbox:AddLabel({Text="Enter any skin, wrap, charm or finisher. Not case-sensitive.", DoesWrap=true})
+SkinGroupbox:AddInput("SkinNameInput", {
+    Text="Cosmetic name (e.g. AKEY-47)",
+    Default="", Numeric=false,
+    Callback=function(v) targetSkinName=v end
+})
+SkinGroupbox:AddButton({
+    Text="🔓 Unlock & Add to Dropdown", DoubleClick=false,
+    Func=function()
+        if not modulesReady then Library:Notify({Title="⏳ Not Ready",Description="Still loading.",Time=3}) return end
+        if targetSkinName=="" then Library:Notify({Title="❌ Empty",Description="Enter a cosmetic name!",Time=3}) return end
+        local ok, err = pcall(function()
+            local resolvedName = resolveCosmeticName(targetSkinName)
+            if not resolvedName then
+                Library:Notify({Title="❌ Not Found",Description="'"..targetSkinName.."' not found.",Time=5})
+                return
+            end
+            if unlockedSkins[resolvedName] then
+                Library:Notify({Title="Already Unlocked",Description=resolvedName.." already unlocked.",Time=3})
+                return
+            end
+            applyPatches()
+            unlockedSkins[resolvedName] = true
+            if not Config.unlockedSkins then Config.unlockedSkins={} end
+            table.insert(Config.unlockedSkins, resolvedName)
+            saveConfig()
+            table.insert(dropdownOptions, resolvedName)
+            if SkinDropdown then
+                pcall(function() SkinDropdown:SetValues(dropdownOptions) end)
+            else
+                SkinDropdown = SkinGroupbox:AddDropdown("SkinEquipDropdown", {
+                    Text="Equip on held weapon", Values=dropdownOptions, Default=1,
+                    Callback=function(value)
+                        if not modulesReady then return end
+                        local char = player.Character
+                        local tool = char and char:FindFirstChildWhichIsA("Tool")
+                        local wep = tool and tool.Name or ""
+                        if wep == "" then
+                            Library:Notify({Title="⚠️ No Weapon",Description="Equip a weapon first.",Time=4})
+                            return
+                        end
+                        if value=="None" then
+                            if equipped[wep] then equipped[wep]["Skin"]=nil if not next(equipped[wep]) then equipped[wep]=nil end end
+                            if Config.equippedSkins and Config.equippedSkins[wep] then Config.equippedSkins[wep]["Skin"]=nil end
+                            saveConfig() replicateWeapon()
+                            Library:Notify({Title="Skin Removed",Description="Re-equip to see change.",Time=3})
+                        else
+                            local cosType=(CosmeticLibrary.Cosmetics[value] and CosmeticLibrary.Cosmetics[value].Type) or "Skin"
+                            local skinData=cloneCosmetic(value,cosType,{})
+                            if skinData then
+                                equipped[wep]=equipped[wep] or {}
+                                equipped[wep][cosType]=skinData
+                                Config.equippedSkins=Config.equippedSkins or {}
+                                Config.equippedSkins[wep]=Config.equippedSkins[wep] or {}
+                                Config.equippedSkins[wep][cosType]=value
+                                saveConfig() replicateWeapon()
+                                Library:Notify({Title="✅ Equipped!",Description=value.." → "..wep,Time=4})
+                            end
+                        end
+                    end
+                })
+            end
+            Library:Notify({Title="🔓 Unlocked: "..resolvedName,Description="Pick from dropdown while holding weapon.",Time=5})
+        end)
+        if not ok then Library:Notify({Title="Error",Description=tostring(err),Time=6}) end
+    end
+})
+SkinGroupbox:AddLabel({Text="Hold your weapon when selecting from the dropdown.", DoesWrap=true})
+
+local EquippedGroupbox = UnlockTab:AddRightGroupbox("🎒 Active Loadout")
+EquippedGroupbox:AddLabel({Text="Cosmetics persist per-weapon and save automatically.", DoesWrap=true})
+EquippedGroupbox:AddButton({
+    Text="🔄 Re-apply All", DoubleClick=false,
+    Func=function()
+        if not modulesReady then Library:Notify({Title="Not Ready",Description="Still loading.",Time=3}) return end
+        replicateWeapon()
+        Library:Notify({Title="✅ Re-applied",Description="Re-equip weapon to see.",Time=4})
+    end
+})
+EquippedGroupbox:AddButton({
+    Text="🗑️ Clear All Equipped", DoubleClick=true,
+    Func=function()
+        equipped={} Config.equippedSkins={}
+        saveConfig() replicateWeapon()
+        Library:Notify({Title="Cleared",Description="All equipped cosmetics removed.",Time=3})
+    end
+})
+
+local WeaponGroupbox = UnlockTab:AddRightGroupbox("🔫 Weapons")
+WeaponGroupbox:AddToggle("WeaponUnlockToggle", {
+    Text="Unlock All Weapons", Default=weaponUnlockEnabled,
+    Callback=function(v)
+        weaponUnlockEnabled=v
+        Config.weaponUnlockEnabled=v
+        saveConfig()
+        if v then
+            task.spawn(function()
+                while not modulesReady do task.wait(0.5) end
+                applyPatches()
+                Library:Notify({Title="✅ Weapons Unlocked",Description="Open weapons menu to see all.",Time=4})
+            end)
+        else
+            Library:Notify({Title="Weapon Unlock",Description="Disabled.",Time=3})
+        end
+    end
+})
+WeaponGroupbox:AddLabel({Text="Visual only. Auto-suspends during duels.", DoesWrap=true})
+
+-- ==================== LEADERBOARD TAB ====================
+local LeaderboardTab = Window:AddTab("Leaderboard", "chart-bar")
+local LBGroupbox = LeaderboardTab:AddLeftGroupbox("📊 Spoofer")
+LBGroupbox:AddToggle("LBSpoofToggle", {
+    Text="Enable Leaderboard Spoof", Default=leaderboardSpoofEnabled,
+    Callback=function(v)
+        leaderboardSpoofEnabled=v Config.leaderboardEnabled=v saveConfig()
+        if v then applyNametag() Library:Notify({Title="✅ Active",Description="Only you see these values.",Time=3})
+        else Library:Notify({Title="Disabled",Description="Leaderboard spoof off.",Time=3}) end
+    end
+})
+LBGroupbox:AddLabel({Text="Affects leaderboards, nametag, ranked charm, server list.", DoesWrap=true})
+
+local LBRightGroupbox = LeaderboardTab:AddRightGroupbox("📝 Values")
+LBRightGroupbox:AddInput("EloInput", {Text="ELO", Default=Config.leaderboardELO~=0 and tostring(Config.leaderboardELO) or "", Numeric=true,
+    Callback=function(v) leaderboardSpoofValues["Highest ELO"]=tonumber(v) or 0 Config.leaderboardELO=tonumber(v) or 0 saveConfig() if leaderboardSpoofEnabled then applyNametag() end end})
+LBRightGroupbox:AddInput("StreakInput", {Text="Win Streak", Default=Config.leaderboardStreak~=0 and tostring(Config.leaderboardStreak) or "", Numeric=true,
+    Callback=function(v) leaderboardSpoofValues["Current Highest Win Streak"]=tonumber(v) or 0 Config.leaderboardStreak=tonumber(v) or 0 saveConfig() if leaderboardSpoofEnabled then applyNametag() end end})
+LBRightGroupbox:AddInput("WinsInput", {Text="Most Wins", Default=Config.leaderboardWins~=0 and tostring(Config.leaderboardWins) or "", Numeric=true,
+    Callback=function(v) leaderboardSpoofValues["Most Wins"]=tonumber(v) or 0 Config.leaderboardWins=tonumber(v) or 0 saveConfig() if leaderboardSpoofEnabled then applyNametag() end end})
+LBRightGroupbox:AddInput("ElimInput", {Text="Most Eliminations", Default=Config.leaderboardElims~=0 and tostring(Config.leaderboardElims) or "", Numeric=true,
+    Callback=function(v) leaderboardSpoofValues["Most Eliminations"]=tonumber(v) or 0 Config.leaderboardElims=tonumber(v) or 0 saveConfig() if leaderboardSpoofEnabled then applyNametag() end end})
+LBRightGroupbox:AddInput("LevelInput", {Text="Level", Default=Config.leaderboardLevel~=0 and tostring(Config.leaderboardLevel) or "", Numeric=true,
+    Callback=function(v) leaderboardSpoofValues["Highest Level"]=tonumber(v) or 0 Config.leaderboardLevel=tonumber(v) or 0 saveConfig() if leaderboardSpoofEnabled then applyNametag() end end})
+
+-- ==================== SPOOFER TAB ====================
+local SpooferTab = Window:AddTab("Spoofer", "user-pen")
+local CharmGroup = SpooferTab:AddLeftGroupbox("🏆 Charm Rank Spoofer")
+CharmGroup:AddLabel({Text="Spoofs the placement number on your Archnemesis charm. Re-equip charm after enabling.", DoesWrap=true})
+CharmGroup:AddToggle("CharmRankToggle", {
+    Text="Enable Charm Rank Spoof", Default=charmRankEnabled,
+    Callback=function(v)
+        charmRankEnabled=v Config.charmRankEnabled=v saveConfig()
+        if v then
+            applyCharmRankHook()
+            Library:Notify({Title="✅ Charm Rank Active",Description="Rank #"..charmRankValue.." — re-equip charm!",Time=4})
+        else
+            Library:Notify({Title="Charm Rank Disabled",Description="",Time=3})
+        end
+    end
+})
+CharmGroup:AddSlider("CharmRankSlider", {
+    Text="Placement Rank", Default=Config.charmRankValue or 1, Min=1, Max=200, Rounding=0,
+    Callback=function(v)
+        charmRankValue=v Config.charmRankValue=v saveConfig()
+        if charmRankEnabled then Library:Notify({Title="Rank #"..v,Description="Re-equip charm to see.",Time=3}) end
+    end
+})
+
+-- ==================== SETTINGS TAB ====================
+local SettingsTab = Window:AddTab("Settings", "settings")
+local SettingsLeft = SettingsTab:AddLeftGroupbox("⚙️ Configuration")
+SettingsLeft:AddButton({Text="💾 Save Config", DoubleClick=false, Func=function()
+    pcall(function() writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end)
+    Library:Notify({Title="Saved",Description="Config saved.",Time=3})
+end})
+SettingsLeft:AddButton({Text="📂 Load Config", DoubleClick=false, Func=function()
+    loadConfig()
+    Library:Notify({Title="Loaded",Description="Restart to fully apply.",Time=4})
+end})
+SettingsLeft:AddButton({Text="🗑️ Clear Config", DoubleClick=true, Func=function()
+    Config={}
+    for k,v in pairs(defaultConfig) do Config[k]=v end
+    pcall(function() writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end)
+    unlockedSkins={} equipped={} cosmeticNameCache=nil dropdownOptions={"None"}
+    weaponUnlockEnabled=false
+    if SkinDropdown then pcall(function() SkinDropdown:Destroy() end) SkinDropdown=nil end
+    Library:Notify({Title="Cleared",Description="Config reset.",Time=3})
+end})
+SettingsLeft:AddLabel({Text="Config auto-saves. Old/corrupt configs are automatically cleaned on load.", DoesWrap=true})
+
+local SettingsRight = SettingsTab:AddRightGroupbox("🔁 Auto Reconnect")
+local autoReconnect = false
+SettingsRight:AddToggle("AutoReconnectToggle", {Text="Auto Re-apply After Match", Default=false, Callback=function(v) autoReconnect=v end})
+SettingsRight:AddLabel({Text="Re-applies settings after returning from a match.", DoesWrap=true})
+
+local SettingsCredits = SettingsTab:AddLeftGroupbox("❤️ Credits")
+SettingsCredits:AddLabel({Text="🐬 DolphinV1 Private — fully developed by @dolphinbackup", DoesWrap=true})
+
+game:GetService("TeleportService").LocalPlayerArrivedFromTeleport:Connect(function()
+    if autoReconnect then
+        task.wait(3)
+        Library:Notify({Title="🐬 Auto Reconnect",Description="Re-applying config...",Time=4})
+        loadConfig() applyNametag()
+    end
+end)
+
+print("✅ DolphinV1 + Anticheat Bypass Loaded Successfully!")
